@@ -10,6 +10,11 @@
 #include "devices/shutdown.h"
 #include "devices/block.h"
 
+// Lily
+
+const int MIN_FILENAME = 1;
+const int MAX_FILENAME = 14;
+
 typedef int pid_t;
 
 struct file_descriptor
@@ -20,15 +25,13 @@ struct file_descriptor
 
 };
 
-// struct list open_list;
+static struct lock filesys_lock; 
 
-static struct lock filesys_lock;
-
-static void syscall_handler (struct intr_frame *);
-
-// helper
+// helper function
 bool is_valid_ptr(const void *ptr);
 bool is_valid_filename(const void *file);
+
+static void syscall_handler (struct intr_frame *);
 
 static void halt(void);
 
@@ -60,8 +63,12 @@ syscall_handler (struct intr_frame *f)
 {
   // printf("%04x\n", f->cs);
   uint32_t *esp = f->esp;
-  if (!is_valid_ptr(esp) || !is_valid_ptr(esp + 1) 
-    || !is_valid_ptr(esp + 2) || !is_valid_ptr(esp + 3)) 
+  uint32_t *argv0 = esp + 1;
+  uint32_t *argv1 = esp + 2;
+  uint32_t *argv2 = esp + 3;
+
+  if (!is_valid_ptr(esp) || !is_valid_ptr(argv0) 
+    || !is_valid_ptr(argv1) || !is_valid_ptr(argv2)) 
   {
     exit(-1);
   }
@@ -77,40 +84,40 @@ syscall_handler (struct intr_frame *f)
       halt();
   		break;
   	case SYS_EXIT:
-      exit(*(esp + 1));
+      exit(*argv0);
   		break;
   	case SYS_EXEC:
-      f->eax = exec((char *)*(esp + 1));
+      f->eax = exec((char *)*argv0);
   		break;
   	case SYS_WAIT:
-      f->eax = wait(*(esp + 1));
+      f->eax = wait(*argv0);
   		break;
   	case SYS_CREATE:
-      f->eax = create((char *)*(esp + 1), *(esp + 2));
+      f->eax = create((char *)*argv0, *argv1);
   		break;
   	case SYS_REMOVE:
-      f->eax = remove((char *)*(esp + 1));
+      f->eax = remove((char *)*argv0);
   		break;
   	case SYS_OPEN:
-      f->eax = open((char *)*(esp + 1));
+      f->eax = open((char *)*argv0);
   		break;
   	case SYS_FILESIZE:
-      f->eax = filesize(*(esp + 1));
+      f->eax = filesize(*argv0);
   		break;
   	case SYS_READ:
-      f->eax = read(*(esp + 1), (void *)*(esp + 2), *(esp + 3));
+      f->eax = read(*argv0, (void *)*argv1, *argv2);
   		break;
   	case SYS_WRITE:
-  		f->eax = write(*(esp + 1), (void *)*(esp + 2), *(esp + 3));
+  		f->eax = write(*argv0, (void *)*argv1, *argv2);
   		break;
   	case SYS_SEEK:
-      seek(*(esp + 1), *(esp + 2));
+      seek(*argv0, *argv1);
   		break;
   	case SYS_TELL:
-      f->eax = tell(*(esp + 1));
+      f->eax = tell(*argv0);
   		break;
   	case SYS_CLOSE:
-      close(*(esp + 1));
+      close(*argv0);
   		break; 
   	default:
   		break; 		  	
@@ -119,28 +126,30 @@ syscall_handler (struct intr_frame *f)
   // hex_dump(f->eip, f->eip, 64, true);
 }
 
-
+/* Check whether *ptr is valid -- 
+   1. ptr shouldn't be a null pointer;
+   2. ptr should point to user memory;
+   3. ptr shouldn't point to unmapped virtual memory.*/
 bool 
 is_valid_ptr(const void *ptr) 
 {
-  struct thread *t = thread_current();
-  if (ptr == NULL || !is_user_vaddr(ptr))
+  if (ptr == NULL 
+    || !is_user_vaddr(ptr) 
+    || pagedir_get_page(thread_current()->pagedir, ptr) == NULL)
     return false;
-  if (pagedir_get_page(t->pagedir, ptr) == NULL)
-    return false;
+
   return true;
 }
 
+/* Check whether *file is a valid filename. */
 bool 
 is_valid_filename(const void *file)
 {
   if (!is_valid_ptr(file)) 
-  {
     exit(-1);
-  }
 
   int len = strlen(file);
-  return len > 0 && len <= 14;
+  return len >= MIN_FILENAME && len <= MAX_FILENAME;
 }
 
 struct file_descriptor *
@@ -184,44 +193,64 @@ close_openfile(int fd)
   return ;
 }
 
+/* Terminates Pintos. */
 static void 
 halt(void) 
 {
   shutdown_power_off();
 }
 
+/* Terminates the current user program.
+
+   Returning status to the kernel. 
+   status = 0 -- success
+   status = nonzero -- error */
 void 
 exit(int status)
 {
   struct thread *cur = thread_current();
+
   printf("%s: exit(%d)\n", cur->name, status);
+
+    /* If its parent is still waiting for it, 
+     tell its parent its exit status. */
   if (cur->parent != NULL)
   {
     cur->parent->child_exit_status = status;
     // printf("parent %s: child_exit(%d)\n", cur->parent->name, cur->parent->child_exit_status);
   }
 
+  /* Close all the files it's opened. */
   // mmb -- the key to multi-oom
   while (!list_empty(&cur->open_fd)) 
   {
     close(list_entry(list_begin(&cur->open_fd), struct file_descriptor, elem)->fd);  
   }
 
+  /* Close its executable file. */
+  file_close(cur->file);
+  // Lily
+
   thread_exit();
 }
 
+/* Run the executable whose name is given in cmd_line, 
+   passing any given arguments.
+
+   Return the new process's program id(pid). 
+   Must return pid -1, which otherwise should not be a valid pid,
+   if the program cannot load or run for any reason.*/
 static pid_t 
 exec(const char *cmd_line)
 {  
-
   // printf("exec %s\n", cmd_line);
 
-  if (cmd_line == NULL || !is_valid_ptr(cmd_line))
+  if (!is_valid_ptr(cmd_line))
     exit(-1);
 
-  for (char *p = cmd_line; *p != '\0'; p++)
-    if (!is_valid_ptr(p + 1))
-      exit(-1);
+  // for (char *p = cmd_line; *p != '\0'; p++)
+  //   if (!is_valid_ptr(p + 1))
+  //     exit(-1);
 
   lock_acquire(&filesys_lock);
   tid_t tid = process_execute(cmd_line);
@@ -230,12 +259,18 @@ exec(const char *cmd_line)
   return tid;
 }
 
+/* Wait for a child process pid. 
+   If pid still alive, wait until it terminate.
+   
+   Return the child's exit status.*/
 static int 
 wait(pid_t pid)
 {
   return process_wait(pid);
 }
 
+/* Create a new file called *file that has intial_size size.   
+   Return true if successful, false otherwise. */
 static bool 
 create(const char *file, unsigned initial_size)
 {
@@ -243,7 +278,7 @@ create(const char *file, unsigned initial_size)
     return false;
 
   lock_acquire(&filesys_lock);
-  // status = filesys_create(file, initial_size);
+  // bool status = filesys_create(file, initial_size);
   // status goes wrong !!! I don't know why ... 
 
   block_sector_t inode_sector = 0;
@@ -259,8 +294,11 @@ create(const char *file, unsigned initial_size)
   lock_release(&filesys_lock);
 
   return success;
+  // return status;
 }
 
+/* Delete the file called *file.
+   Return true if successful, false otherwise. */
 static bool 
 remove(const char *file)
 {
@@ -276,6 +314,12 @@ remove(const char *file)
   return status;
 }
 
+/* Assign unique fd to a file.
+   Return fd.
+   This function needs modification -- Overflow 
+   -- new fd is max(fd in open_fd list) + 1.
+   What if open a large number of files 
+   and some low-value fd is closed ? */
 int 
 assign_fd() 
 {
@@ -292,6 +336,8 @@ assign_fd()
   }
 }
 
+/* Compare fd values as list_elem.
+   Return true if fd(a) < fd(b), otherwise false. */
 bool 
 cmp_fd(const struct list_elem *a, const struct list_elem *b, void *aux)
 {
@@ -300,6 +346,10 @@ cmp_fd(const struct list_elem *a, const struct list_elem *b, void *aux)
   return left->fd < right->fd;
 }
 
+/* Open the file called *file, assign the opened file a fd 
+   and the current process should keep track of it in open_fd list.
+
+   Return fd if the file can be opend, otherwise -1.*/
 static int 
 open(const char *file)
 {
@@ -327,6 +377,7 @@ open(const char *file)
   return fd;
 }
 
+/* Close file of fd. */
 static void 
 close(int fd)
 {
@@ -336,12 +387,15 @@ close(int fd)
 
 }
 
+/* Get the size of fd file.
+   Return its size. */
 static int
 filesize(int fd)
 {
   int size = -1;
 
   lock_acquire(&filesys_lock);
+
   struct file_descriptor *file_descriptor = get_openfile(fd);
     if (file_descriptor != NULL)
       size = file_length(file_descriptor->file);
@@ -351,17 +405,20 @@ filesize(int fd)
   return size;
 }
 
+/* Read size bytes from fd into buffer.
+   Return the number of bytes actully read. 
+   Fd 0 -- read from the keyboard. */
 static int 
 read(int fd, void *buffer, unsigned size)
 {
   // printf("reading\n");
   int status = -1;
 
-  if (buffer == NULL || !is_valid_ptr(buffer) || !is_valid_ptr(buffer + size - 1)) 
+  if (!is_valid_ptr(buffer) || !is_valid_ptr(buffer + size - 1)) 
     exit(-1);
 
   lock_acquire(&filesys_lock);
-  if (fd == STDIN_FILENO)
+  if (fd == STDIN_FILENO) /* Fead from the keyboard.*/
   {
     uint8_t *p = buffer;
     uint8_t c;
@@ -388,6 +445,9 @@ read(int fd, void *buffer, unsigned size)
   return status;
 }
 
+/* Write size bytes from buffer to fd.
+   Return the number of bytes actually written.
+   Fd 1 -- write to the console*/
 static int
 write(int fd, const void *buffer, unsigned size) 
 {
@@ -397,12 +457,12 @@ write(int fd, const void *buffer, unsigned size)
     exit(-1);
 
   lock_acquire(&filesys_lock);
-	if (fd == STDOUT_FILENO)
+	if (fd == STDOUT_FILENO) /* Write to the console.*/
 	{
 		putbuf(buffer, size);
 		// hex_dump(buffer, buffer, 64, true);
 		status = size;
-	} else if (fd != STDIN_FILENO)
+	} else if (fd != STDIN_FILENO) 
   {
     struct file_descriptor *file_descriptor = get_openfile(fd);
     // printf("file %d\n", file_descriptor->file->deny_write);
@@ -416,6 +476,8 @@ write(int fd, const void *buffer, unsigned size)
   return status;
 }
 
+/* Change the next byte to be read/written in open fd to position,
+   expressed in bytes from the beginning of the file. */
 static void 
 seek(int fd, unsigned position)
 {
@@ -428,6 +490,8 @@ seek(int fd, unsigned position)
   return ;
 }
 
+/* Get the position of the next byte te be read/writen in open fd,
+   expressed in bytes from the beginning of the file.*/
 static unsigned 
 tell(int fd)
 {

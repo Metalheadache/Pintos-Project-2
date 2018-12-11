@@ -145,8 +145,16 @@ page_fault (struct intr_frame *f)
   page_fault_cnt++;
 
   // Lily
-  if (page_fault_cnt != 0)
+  // if (page_fault_cnt != 0)
+    // exit(-1);
+  if (!not_present)
     exit(-1);
+
+  if (fault_addr == NULL || !is_user_vaddr(fault_addr) 
+    || !pagedir_get_page(thread_current()->pagedir, fault_addr))
+    exit(-1);
+
+  // Lily
 
   /* Determine cause. */
   not_present = (f->error_code & PF_P) == 0;

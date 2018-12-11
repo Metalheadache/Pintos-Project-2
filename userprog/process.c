@@ -34,7 +34,6 @@ process_execute (const char *file_name)
   char *fn_copy;
   tid_t tid;
 
-  // printf("xxxxx\n");
   /* Make a copy of FILE_NAME.
      Otherwise there's a race between the caller and load(). */
   fn_copy = palloc_get_page (0);
@@ -42,28 +41,30 @@ process_execute (const char *file_name)
     return TID_ERROR;
   strlcpy (fn_copy, file_name, PGSIZE);
 
-  // printf("yyyyyy\n");
   /* Create a new thread to execute FILE_NAME. */
   // tid = thread_create (file_name, PRI_DEFAULT, start_process, fn_copy);
-  // Lily
+  
+  // Lily 
+  /* Seperate filen_name into 2 parts --  
+     argv0 for filename, save_ptr for other arguments  */
   char *argv0, *save_ptr;
   argv0 = strtok_r(fn_copy, " ", &save_ptr);
-  // printf("%s\n", fn_copy);
   tid = thread_create (argv0, thread_current()->priority,
    start_process, save_ptr);
   
+  /*The parent process should wait until it knows
+     whether the child process successfully loaded its executable. */
   sema_down(&thread_current()->process_wait);
-
-  // if (thread_current()->child_load_status == -1)
-  //   tid = TID_ERROR;
+  // Lily
 
   if (tid == TID_ERROR)
-    // palloc_free_page(pg_round_down(fn_copy));
     palloc_free_page (fn_copy); 
 
   // return tid;
+
   // Lily
   return thread_current()->child_load_status;
+  // Lily
 }
 
 /* A thread function that loads a user process and starts it
@@ -71,7 +72,6 @@ process_execute (const char *file_name)
 static void
 start_process (void *args_)
 {
-  // printf("haha_start_process\n");
   // printf("start_thread: %s, tid: %d, priority: %d\n", 
   //   thread_current()->name, thread_current()->tid, thread_current()->priority);
   char * args = args_;
@@ -87,9 +87,11 @@ start_process (void *args_)
 
   /* If load failed, quit. */
   // palloc_free_page (args);
+
   // Lily
   palloc_free_page(pg_round_down(args));
 
+  /* Limit on the depth of threads*/
   // if (success)
   // {
   //   struct thread *t = thread_current();
@@ -104,22 +106,25 @@ start_process (void *args_)
   //     success = false;
   // }
 
+  /* if loading fails, set the load_status -1 and exit. */
   if (!success) 
   {
     if (thread_current()->parent != NULL)
       thread_current()->parent->child_load_status = -1;
-
-    // sema_up(&thread_current()->parent->process_wait);
-    thread_exit ();
+    thread_exit();
   }
 
-
+  /* If loading succeed, its parent ends waiting,
+     and the child thread starts waiting for its parent. */
   sema_up(&thread_current()->parent->process_wait);
   sema_down(&thread_current()->process_wait);
   // printf("running %s\n", thread_current()->name);
-  // Lily -- rox
+  
+  /* Ensure that the executable of a running process cannot
+     be modified. */
   thread_current()->file = filesys_open (thread_name());
   file_deny_write(thread_current()->file);
+  // Lily
 
   /* Start the user process by simulating a return from an
      interrupt, implemented by intr_exit (in
@@ -142,12 +147,14 @@ start_process (void *args_)
    does nothing. */
 int
 process_wait (tid_t child_tid) 
-{
+{ 
+  // Lily
   int status = -1;
   struct list_elem *e;
   struct thread *cur = thread_current();
   // printf("process_wait %s\n", cur->name);
-  // bool hasChild = false;
+
+  /* child_tid should be its direct child.*/
   struct thread *child = NULL;
   for (e = list_begin (&cur->children); e != list_end (&cur->children);
      e = list_next (e))
@@ -157,11 +164,11 @@ process_wait (tid_t child_tid)
     {
       // printf("wait for child %s\n", tmp->name);
       child = tmp;
-      // hasChild = true;
       break;
     }
   }
 
+  /* If process child_tid is its child, let it wait for its child. */
   if (child != NULL) {
     // the order is important !!!!
     sema_up(&child->process_wait);
@@ -169,14 +176,9 @@ process_wait (tid_t child_tid)
     status = cur->child_exit_status;
     // printf("child_exit status %d\n", cur->child_exit_status);
   }
-
-
-  // if (e != list_end (&cur->children)) {
-  //   status = cur->child_exit_status;
-  //   printf("child_exit status %d\n", cur->child_exit_status);
-  // }
-
+  
   return status;
+  // Lily
 }
 
 /* Free the current process's resources. */
@@ -185,8 +187,12 @@ process_exit (void)
 {
 
   struct thread *cur = thread_current ();
-  uint32_t *pd;
 
+  // Lily
+  /* Deal with its parent -- 
+     If its parent is still waiting for it, 
+     remove itself from children list of its parent
+     and stop its parent waiting. */
   if (cur->parent != NULL)
   {
     list_remove(&cur->child_elem);
@@ -194,6 +200,8 @@ process_exit (void)
     // printf("parent %s: child_exit(%d)\n", cur->parent, cur->parent->child_exit_status);
   }
 
+  /* Deal with its chidren --
+     Stop all its children waiting. */
   struct list_elem *e;
   for (e = list_begin (&cur->children); e != list_end (&cur->children);
      e = list_next (e))
@@ -201,12 +209,11 @@ process_exit (void)
     struct thread *tmp = list_entry (e, struct thread, child_elem);
     sema_up(&tmp->process_wait);
   }
+  // Lily
 
-  // Lily -- rox
-  file_close(cur->file);
   /* Destroy the current process's page directory and switch back
      to the kernel-only page directory. */
-  pd = cur->pagedir;
+  uint32_t *pd = cur->pagedir;
   if (pd != NULL) 
     {
       /* Correct ordering here is crucial.  We must set
@@ -532,12 +539,17 @@ load_segment (struct file *file, off_t ofs, uint8_t *upage,
   return true;
 }
 
+// Lily
+/* Used for inserting argument address into list. */
 struct argument_addr
 {
   struct list_elem list_elem;
   uint32_t addr;
 };
 
+// Lily
+/* Push one arugment into stack and 
+   push its address into the list.  */
 void push_argument_(void **esp, const char *arg, struct list *list) 
 {
   int len = strlen(arg) + 1;
@@ -551,6 +563,20 @@ void push_argument_(void **esp, const char *arg, struct list *list)
   list_push_back(list, &addr->list_elem);
 }
 
+// Lily
+/* Push all arguments into stack.
+   The arrangement of stack is as following:
+    |  0          | <-- stack pointer
+    |  argc       |
+    |  argv       |
+    |  argv[0]    |
+    |  argv[1]    | 
+    |  argv[2]    |
+    |  null       | (sentinel)
+    |  argument2  | 
+    |  argument1  |
+    |  argument0  | (filename)  
+   */
 void push_arguments(void **esp, const char *args) 
 {
   struct list list;
@@ -559,11 +585,11 @@ void push_arguments(void **esp, const char *args)
   *esp = PHYS_BASE; 
   uint32_t arg_num = 1;
 
-
+  /* Push filename into stack. */
   const char *arg = thread_name();
   push_argument_(esp, arg, &list);
 
-  // push all arguments to stack
+  /* Push other arguments into stack. */
   char *token, *save_ptr;
   for (token = strtok_r(args, " ", &save_ptr); 
     token != NULL;
@@ -573,15 +599,17 @@ void push_arguments(void **esp, const char *args)
     push_argument_(esp, token, &list);
   }
 
+  /* Set alignment. */
   int total = PHYS_BASE - *esp;
-  // printf("%x\n", *esp);
   *esp = *esp - (4 - total % 4) - 4;
-  // printf("%x\n", *esp);
+
+  /* Push a null pointer sentinel. */
   *esp -= 4;
-  // error 
-  // * (uint32_t *) esp = (uint32_t) NULL;
+  // error : * (uint32_t *) esp = (uint32_t) NULL;
   * (uint32_t *) *esp = (uint32_t) NULL;
 
+  /* Push all the addresses of arguments into stack. 
+     The addresses are popped out from list. */
   while (!list_empty(&list)) {
     struct argument_addr *addr = 
       list_entry(list_pop_back(&list), struct argument_addr, list_elem);
@@ -591,14 +619,16 @@ void push_arguments(void **esp, const char *args)
     // printf("%x\n", addr->addr);
   }
 
+  /* Push argv -- the first argument address. */
   *esp -= 4;
   * (uint32_t *) *esp = (uint32_t *)(*esp + 4);
 
+  /* Push argc -- the total number of arguments. */
   *esp -= 4;
   * (uint32_t *) *esp = arg_num;
 
+  /* Push 0 as a fake return address. */
   *esp -= 4;
-  // printf("%x\n", *esp);
   * (uint32_t *) *esp = 0x0;
 
   // hex_dump(*esp, *esp, 64, true);
@@ -625,6 +655,7 @@ setup_stack (void **esp, const char *args)
         push_arguments(esp, args);
         // hex_dump(0, PHYS_BASE - 12, 64, true);
         // printf("%x\n", PHYS_BASE - 12);
+        // Lily
       }
         
       else

@@ -139,7 +139,7 @@ sema_up (struct semaphore *sema)
   intr_set_level (old_level);
 
   // Lily
-  check_priority();
+  // check_priority();
 }
 
 static void sema_test_helper (void *sema_);

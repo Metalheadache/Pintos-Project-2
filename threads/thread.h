@@ -99,7 +99,6 @@ struct thread
     /* Shared between thread.c and synch.c. */
     struct list_elem elem;              /* List element. */
 
-
     // Lily
     int64_t sleep_until;                /* End timestamp of sleep*/
     int original_priority;   
@@ -117,17 +116,19 @@ struct thread
     /* Owned by userprog/process.c. */
     uint32_t *pagedir;                  /* Page directory. */
 
+    // Lily -- proj2
+    struct thread *parent;              /* Which thread creates this one. */
+    
+    struct list children;               /* Threads that this one creates. */
+    struct list_elem child_elem;        /* List element for list children. */
+    int child_load_status;              /* Load status of its child*/
+    int child_exit_status;              /* Exit status of its child*/ 
+    
+    struct list open_fd;                /* Fds the thread opens*/
+    struct file *file;                  /* Executable file of this thread. */
+    
+    struct semaphore process_wait;      /* Determine whether thread should wait. */
     // Lily
-    struct thread *parent;
-    // tid_t child_tid;
-    struct list_elem child_elem;
-    struct list children;
-
-    int child_load_status;
-    int child_exit_status;
-    struct list open_fd;
-    struct file *file; // rox
-    struct semaphore process_wait;
 
 #endif
 
@@ -166,6 +167,7 @@ const char *thread_name (void);
 
 void thread_exit (void) NO_RETURN;
 void thread_yield (void);
+void thread_yield__ (struct thread*);
 
 /* Performs some operation on thread t, given auxiliary data AUX. */
 typedef void thread_action_func (struct thread *t, void *aux);
